@@ -1,11 +1,17 @@
 import base64
 import os
+import sys
 import tempfile
 from typing import Any, Dict, List, Optional
 
 import requests
 import runpod
 from faster_whisper import WhisperModel
+
+print("=" * 50, file=sys.stderr)
+print("Starting Whisper Worker...", file=sys.stderr)
+print(f"Python version: {sys.version}", file=sys.stderr)
+print("=" * 50, file=sys.stderr)
 
 SUPPORTED_MODELS = {
     "tiny",
@@ -30,6 +36,8 @@ ALLOW_LOCAL_MODEL = os.getenv("WHISPER_ALLOW_LOCAL_PATH", "").lower() in (
     "yes",
 )
 
+print(f"Config: MODEL={MODEL_NAME}, DEVICE={DEVICE}, COMPUTE_TYPE={COMPUTE_TYPE}", file=sys.stderr)
+
 allowlist_raw = os.getenv("WHISPER_MODEL_ALLOWLIST")
 ALLOWED_MODELS = (
     {item.strip() for item in allowlist_raw.split(",") if item.strip()}
@@ -37,9 +45,8 @@ ALLOWED_MODELS = (
     else None
 )
 
-_model_cache = {
-    MODEL_NAME: WhisperModel(MODEL_NAME, device=DEVICE, compute_type=COMPUTE_TYPE)
-}
+# Lazy loading - don't load model at startup
+_model_cache: Dict[str, WhisperModel] = {}
 
 
 def _to_float(value: Any, default: Optional[float] = None) -> Optional[float]:
@@ -78,6 +85,7 @@ def _is_local_model(value: str) -> bool:
 
 def _get_model(model_name: str) -> WhisperModel:
     if model_name in _model_cache:
+        print(f"Using cached model: {model_name}", file=sys.stderr)
         return _model_cache[model_name]
 
     if MODEL_CACHE_LIMIT <= 1:
@@ -85,9 +93,15 @@ def _get_model(model_name: str) -> WhisperModel:
     elif len(_model_cache) >= MODEL_CACHE_LIMIT:
         _model_cache.clear()
 
-    _model_cache[model_name] = WhisperModel(
-        model_name, device=DEVICE, compute_type=COMPUTE_TYPE
-    )
+    print(f"Loading model: {model_name} (device={DEVICE}, compute_type={COMPUTE_TYPE})...", file=sys.stderr)
+    try:
+        _model_cache[model_name] = WhisperModel(
+            model_name, device=DEVICE, compute_type=COMPUTE_TYPE
+        )
+        print(f"Model {model_name} loaded successfully!", file=sys.stderr)
+    except Exception as e:
+        print(f"ERROR loading model {model_name}: {e}", file=sys.stderr)
+        raise
     return _model_cache[model_name]
 
 
@@ -235,4 +249,5 @@ def handler(event: Dict[str, Any]) -> Dict[str, Any]:
                 pass
 
 
+print("Worker initialized, starting RunPod serverless...", file=sys.stderr)
 runpod.serverless.start({"handler": handler})
