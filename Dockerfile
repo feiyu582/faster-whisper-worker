@@ -21,7 +21,10 @@ COPY requirements.txt .
 RUN python -m pip install --upgrade pip setuptools wheel \
   && pip install --no-cache-dir -r requirements.txt
 
-# 复制处理程序
+# 复制处理程序和启动脚本
 COPY handler.py .
+COPY start.sh .
+COPY test_input.json .
+RUN chmod +x start.sh
 
-CMD ["python", "-u", "handler.py"]
+CMD ["./start.sh"]
