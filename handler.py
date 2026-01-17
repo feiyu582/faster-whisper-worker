@@ -181,10 +181,10 @@ def handler(event: Dict[str, Any]) -> Dict[str, Any]:
     word_timestamps = bool(payload.get("word_timestamps", False))
 
     temperature = _to_float(payload.get("temperature"), 0.0)
-    best_of = _to_int(payload.get("best_of"))
+    best_of = _to_int(payload.get("best_of"), 5)
     beam_size = _to_int(payload.get("beam_size"), 5)
-    patience = _to_float(payload.get("patience"))
-    length_penalty = _to_float(payload.get("length_penalty"))
+    patience = _to_float(payload.get("patience"), 1.0)
+    length_penalty = _to_float(payload.get("length_penalty"), 1.0)
 
     audio_path = ""
     try:
