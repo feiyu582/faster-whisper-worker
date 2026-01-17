@@ -24,6 +24,11 @@ MODEL_NAME = os.getenv("WHISPER_MODEL", "large-v3")
 DEVICE = os.getenv("WHISPER_DEVICE", "cuda")
 COMPUTE_TYPE = os.getenv("WHISPER_COMPUTE_TYPE", "float16")
 MODEL_CACHE_LIMIT = int(os.getenv("WHISPER_MODEL_CACHE_LIMIT", "1"))
+ALLOW_LOCAL_MODEL = os.getenv("WHISPER_ALLOW_LOCAL_PATH", "").lower() in (
+    "1",
+    "true",
+    "yes",
+)
 
 allowlist_raw = os.getenv("WHISPER_MODEL_ALLOWLIST")
 ALLOWED_MODELS = (
@@ -65,6 +70,10 @@ def _decode_audio_base64(payload: str) -> str:
     with tempfile.NamedTemporaryFile(delete=False, suffix=".mp3") as temp_file:
         temp_file.write(data)
         return temp_file.name
+
+
+def _is_local_model(value: str) -> bool:
+    return bool(value) and (os.path.isdir(value) or os.path.isfile(value))
 
 
 def _get_model(model_name: str) -> WhisperModel:
@@ -136,13 +145,19 @@ def handler(event: Dict[str, Any]) -> Dict[str, Any]:
     if not requested_model:
         requested_model = MODEL_NAME
 
-    if requested_model not in SUPPORTED_MODELS:
+    is_local_model = ALLOW_LOCAL_MODEL and _is_local_model(requested_model)
+
+    if not is_local_model and requested_model not in SUPPORTED_MODELS:
         return {
             "error": "Unsupported model",
             "available_models": sorted(SUPPORTED_MODELS),
         }
 
-    if ALLOWED_MODELS is not None and requested_model not in ALLOWED_MODELS:
+    if (
+        ALLOWED_MODELS is not None
+        and not is_local_model
+        and requested_model not in ALLOWED_MODELS
+    ):
         return {
             "error": "Model not allowed",
             "available_models": sorted(ALLOWED_MODELS),
