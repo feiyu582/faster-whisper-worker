@@ -181,10 +181,10 @@ def handler(event: Dict[str, Any]) -> Dict[str, Any]:
     word_timestamps = bool(payload.get("word_timestamps", False))
 
     temperature = _to_float(payload.get("temperature"), 0.0)
-    best_of = _to_int(payload.get("best_of"), 5)
+    best_of = _to_int(payload.get("best_of"))
     beam_size = _to_int(payload.get("beam_size"), 5)
-    patience = _to_float(payload.get("patience"), 1.0)
-    length_penalty = _to_float(payload.get("length_penalty"), 1.0)
+    patience = _to_float(payload.get("patience"))
+    length_penalty = _to_float(payload.get("length_penalty"))
 
     audio_path = ""
     try:
@@ -196,17 +196,21 @@ def handler(event: Dict[str, Any]) -> Dict[str, Any]:
         model_instance = _get_model(requested_model)
         print(f"Starting transcription with model {requested_model}...", flush=True)
         
-        segments_iter, info = model_instance.transcribe(
-            audio_path,
-            language=language,
-            vad_filter=vad_filter,
-            word_timestamps=word_timestamps,
-            temperature=temperature,
-            best_of=best_of,
-            beam_size=beam_size,
-            patience=patience,
-            length_penalty=length_penalty,
-        )
+        transcribe_kwargs: Dict[str, Any] = {
+            "language": language,
+            "vad_filter": vad_filter,
+            "word_timestamps": word_timestamps,
+            "temperature": temperature,
+            "beam_size": beam_size,
+        }
+        if best_of is not None:
+            transcribe_kwargs["best_of"] = best_of
+        if patience is not None:
+            transcribe_kwargs["patience"] = patience
+        if length_penalty is not None:
+            transcribe_kwargs["length_penalty"] = length_penalty
+
+        segments_iter, info = model_instance.transcribe(audio_path, **transcribe_kwargs)
 
         segments_list: List[Dict[str, Any]] = []
         for seg in segments_iter:
