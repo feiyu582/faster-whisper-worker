@@ -17,6 +17,8 @@ docker push <your-registry>/faster-whisper-worker:latest
    - `WHISPER_MODEL=large-v3`
    - `WHISPER_DEVICE=cuda`
    - `WHISPER_COMPUTE_TYPE=float16`
+   - `WHISPER_MODEL_ALLOWLIST=tiny,base,small,medium,large-v3`
+   - `WHISPER_MODEL_CACHE_LIMIT=1`
 
 ## Input Example
 
@@ -42,6 +44,7 @@ docker push <your-registry>/faster-whisper-worker:latest
   "transcription": "Hello world",
   "language": "en",
   "duration": 12.34,
+  "model": "large-v3",
   "segments": [
     { "start": 0.1, "end": 1.2, "text": "Hello world" }
   ]

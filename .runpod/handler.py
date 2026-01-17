@@ -7,11 +7,34 @@ import requests
 import runpod
 from faster_whisper import WhisperModel
 
+SUPPORTED_MODELS = {
+    "tiny",
+    "base",
+    "small",
+    "medium",
+    "large-v1",
+    "large-v2",
+    "large-v3",
+    "distil-large-v2",
+    "distil-large-v3",
+    "turbo",
+}
+
 MODEL_NAME = os.getenv("WHISPER_MODEL", "large-v3")
 DEVICE = os.getenv("WHISPER_DEVICE", "cuda")
 COMPUTE_TYPE = os.getenv("WHISPER_COMPUTE_TYPE", "float16")
+MODEL_CACHE_LIMIT = int(os.getenv("WHISPER_MODEL_CACHE_LIMIT", "1"))
 
-model = WhisperModel(MODEL_NAME, device=DEVICE, compute_type=COMPUTE_TYPE)
+allowlist_raw = os.getenv("WHISPER_MODEL_ALLOWLIST")
+ALLOWED_MODELS = (
+    {item.strip() for item in allowlist_raw.split(",") if item.strip()}
+    if allowlist_raw
+    else None
+)
+
+_model_cache = {
+    MODEL_NAME: WhisperModel(MODEL_NAME, device=DEVICE, compute_type=COMPUTE_TYPE)
+}
 
 
 def _to_float(value: Any, default: Optional[float] = None) -> Optional[float]:
@@ -42,6 +65,21 @@ def _decode_audio_base64(payload: str) -> str:
     with tempfile.NamedTemporaryFile(delete=False, suffix=".mp3") as temp_file:
         temp_file.write(data)
         return temp_file.name
+
+
+def _get_model(model_name: str) -> WhisperModel:
+    if model_name in _model_cache:
+        return _model_cache[model_name]
+
+    if MODEL_CACHE_LIMIT <= 1:
+        _model_cache.clear()
+    elif len(_model_cache) >= MODEL_CACHE_LIMIT:
+        _model_cache.clear()
+
+    _model_cache[model_name] = WhisperModel(
+        model_name, device=DEVICE, compute_type=COMPUTE_TYPE
+    )
+    return _model_cache[model_name]
 
 
 def _format_timestamp_srt(seconds: float) -> str:
@@ -94,6 +132,22 @@ def handler(event: Dict[str, Any]) -> Dict[str, Any]:
     if not audio_url and not audio_base64:
         return {"error": "Missing audio input"}
 
+    requested_model = str(payload.get("model") or MODEL_NAME).strip()
+    if not requested_model:
+        requested_model = MODEL_NAME
+
+    if requested_model not in SUPPORTED_MODELS:
+        return {
+            "error": "Unsupported model",
+            "available_models": sorted(SUPPORTED_MODELS),
+        }
+
+    if ALLOWED_MODELS is not None and requested_model not in ALLOWED_MODELS:
+        return {
+            "error": "Model not allowed",
+            "available_models": sorted(ALLOWED_MODELS),
+        }
+
     transcription_format = payload.get("transcription") or "plain_text"
     include_segments = bool(payload.get("include_segments", False))
 
@@ -117,7 +171,8 @@ def handler(event: Dict[str, Any]) -> Dict[str, Any]:
         else:
             audio_path = _download_audio(audio_url)
 
-        segments_iter, info = model.transcribe(
+        model_instance = _get_model(requested_model)
+        segments_iter, info = model_instance.transcribe(
             audio_path,
             language=language,
             vad_filter=vad_filter,
@@ -147,6 +202,7 @@ def handler(event: Dict[str, Any]) -> Dict[str, Any]:
             "transcription": text,
             "language": str(info.language) if info and info.language else "unknown",
             "duration": float(info.duration) if info and info.duration else None,
+            "model": requested_model,
         }
 
         if include_segments:
