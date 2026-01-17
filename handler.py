@@ -1,51 +1,253 @@
 """
-Simplified test handler - no model loading, just test if logs work
+Whisper transcription handler for RunPod serverless
 """
+import base64
 import os
 import sys
+import tempfile
+from typing import Any, Dict, List, Optional
+
+import requests
+import runpod
+from faster_whisper import WhisperModel
 
 print("=" * 50, flush=True)
-print("HELLO FROM CONTAINER!", flush=True)
+print("Starting Whisper Worker...", flush=True)
 print(f"Python version: {sys.version}", flush=True)
 print("=" * 50, flush=True)
 
-# Test imports one by one
-print("Testing imports...", flush=True)
+SUPPORTED_MODELS = {
+    "tiny",
+    "base",
+    "small",
+    "medium",
+    "large-v1",
+    "large-v2",
+    "large-v3",
+    "distil-large-v2",
+    "distil-large-v3",
+    "turbo",
+}
 
-try:
-    import runpod
-    print(f"✓ runpod imported: {runpod.__version__}", flush=True)
-except Exception as e:
-    print(f"✗ runpod import failed: {e}", flush=True)
+MODEL_NAME = os.getenv("WHISPER_MODEL", "large-v3")
+DEVICE = os.getenv("WHISPER_DEVICE", "cuda")
+COMPUTE_TYPE = os.getenv("WHISPER_COMPUTE_TYPE", "float16")
+MODEL_CACHE_LIMIT = int(os.getenv("WHISPER_MODEL_CACHE_LIMIT", "1"))
 
-try:
-    import torch
-    print(f"✓ torch imported: {torch.__version__}", flush=True)
-    print(f"  CUDA available: {torch.cuda.is_available()}", flush=True)
-    if torch.cuda.is_available():
-        print(f"  GPU: {torch.cuda.get_device_name(0)}", flush=True)
-except Exception as e:
-    print(f"✗ torch import failed: {e}", flush=True)
+print(f"Config: MODEL={MODEL_NAME}, DEVICE={DEVICE}, COMPUTE_TYPE={COMPUTE_TYPE}", flush=True)
 
-try:
-    from faster_whisper import WhisperModel
-    print("✓ faster_whisper imported", flush=True)
-except Exception as e:
-    print(f"✗ faster_whisper import failed: {e}", flush=True)
+allowlist_raw = os.getenv("WHISPER_MODEL_ALLOWLIST")
+ALLOWED_MODELS = (
+    {item.strip() for item in allowlist_raw.split(",") if item.strip()}
+    if allowlist_raw
+    else None
+)
 
-print("=" * 50, flush=True)
-print("All imports done, starting handler...", flush=True)
-
-
-def handler(event):
-    """Simple test handler - just echo back"""
-    print(f"Handler called with: {event}", flush=True)
-    return {
-        "status": "ok",
-        "message": "Test handler working!",
-        "received": event.get("input", {})
-    }
+# Lazy loading - model will be loaded on first request
+_model_cache: Dict[str, WhisperModel] = {}
 
 
-print("Starting RunPod serverless...", flush=True)
+def _to_float(value: Any, default: Optional[float] = None) -> Optional[float]:
+    try:
+        return float(value)
+    except (TypeError, ValueError):
+        return default
+
+
+def _to_int(value: Any, default: Optional[int] = None) -> Optional[int]:
+    try:
+        return int(value)
+    except (TypeError, ValueError):
+        return default
+
+
+def _download_audio(url: str) -> str:
+    print(f"Downloading audio from: {url}", flush=True)
+    response = requests.get(url, timeout=120)
+    response.raise_for_status()
+    suffix = ".mp3"
+    with tempfile.NamedTemporaryFile(delete=False, suffix=suffix) as temp_file:
+        temp_file.write(response.content)
+        print(f"Audio downloaded: {len(response.content)} bytes", flush=True)
+        return temp_file.name
+
+
+def _decode_audio_base64(payload: str) -> str:
+    print("Decoding base64 audio...", flush=True)
+    data = base64.b64decode(payload)
+    with tempfile.NamedTemporaryFile(delete=False, suffix=".mp3") as temp_file:
+        temp_file.write(data)
+        print(f"Audio decoded: {len(data)} bytes", flush=True)
+        return temp_file.name
+
+
+def _get_model(model_name: str) -> WhisperModel:
+    if model_name in _model_cache:
+        print(f"Using cached model: {model_name}", flush=True)
+        return _model_cache[model_name]
+
+    if MODEL_CACHE_LIMIT <= 1:
+        _model_cache.clear()
+    elif len(_model_cache) >= MODEL_CACHE_LIMIT:
+        _model_cache.clear()
+
+    print(f"Loading model: {model_name} (device={DEVICE}, compute_type={COMPUTE_TYPE})...", flush=True)
+    try:
+        _model_cache[model_name] = WhisperModel(
+            model_name, device=DEVICE, compute_type=COMPUTE_TYPE
+        )
+        print(f"Model {model_name} loaded successfully!", flush=True)
+    except Exception as e:
+        print(f"ERROR loading model {model_name}: {e}", flush=True)
+        raise
+    return _model_cache[model_name]
+
+
+def _format_timestamp_srt(seconds: float) -> str:
+    ms = int(seconds * 1000)
+    hours = ms // 3600000
+    ms %= 3600000
+    minutes = ms // 60000
+    ms %= 60000
+    secs = ms // 1000
+    ms %= 1000
+    return f"{hours:02}:{minutes:02}:{secs:02},{ms:03}"
+
+
+def _format_timestamp_vtt(seconds: float) -> str:
+    ms = int(seconds * 1000)
+    hours = ms // 3600000
+    ms %= 3600000
+    minutes = ms // 60000
+    ms %= 60000
+    secs = ms // 1000
+    ms %= 1000
+    return f"{hours:02}:{minutes:02}:{secs:02}.{ms:03}"
+
+
+def _format_transcript(segments: List[Dict[str, Any]], fmt: str) -> str:
+    if fmt == "formatted_text":
+        return "\n".join(seg["text"] for seg in segments).strip()
+    if fmt == "srt":
+        lines: List[str] = []
+        for idx, seg in enumerate(segments, start=1):
+            start = _format_timestamp_srt(seg["start"])
+            end = _format_timestamp_srt(seg["end"])
+            lines.extend([str(idx), f"{start} --> {end}", seg["text"], ""])
+        return "\n".join(lines).strip()
+    if fmt == "vtt":
+        lines = ["WEBVTT", ""]
+        for seg in segments:
+            start = _format_timestamp_vtt(seg["start"])
+            end = _format_timestamp_vtt(seg["end"])
+            lines.extend([f"{start} --> {end}", seg["text"], ""])
+        return "\n".join(lines).strip()
+    return " ".join(seg["text"] for seg in segments).strip()
+
+
+def handler(event: Dict[str, Any]) -> Dict[str, Any]:
+    print(f"Handler received request", flush=True)
+    payload = event.get("input", {})
+    audio_url = payload.get("audio_url") or payload.get("audio") or payload.get("audioUrl")
+    audio_base64 = payload.get("audio_base64")
+
+    if not audio_url and not audio_base64:
+        return {"error": "Missing audio input. Please provide 'audio_url' or 'audio_base64'"}
+
+    requested_model = str(payload.get("model") or MODEL_NAME).strip()
+    if not requested_model:
+        requested_model = MODEL_NAME
+
+    if requested_model not in SUPPORTED_MODELS:
+        return {
+            "error": "Unsupported model",
+            "available_models": sorted(SUPPORTED_MODELS),
+        }
+
+    if ALLOWED_MODELS is not None and requested_model not in ALLOWED_MODELS:
+        return {
+            "error": "Model not allowed",
+            "available_models": sorted(ALLOWED_MODELS),
+        }
+
+    transcription_format = payload.get("transcription") or "plain_text"
+    include_segments = bool(payload.get("include_segments", False))
+
+    language = payload.get("language")
+    if language in ("", "auto", "null", None):
+        language = None
+
+    vad_filter = bool(payload.get("enable_vad", False) or payload.get("vad_filter", False))
+    word_timestamps = bool(payload.get("word_timestamps", False))
+
+    temperature = _to_float(payload.get("temperature"), 0.0)
+    best_of = _to_int(payload.get("best_of"))
+    beam_size = _to_int(payload.get("beam_size"), 5)
+    patience = _to_float(payload.get("patience"))
+    length_penalty = _to_float(payload.get("length_penalty"))
+
+    audio_path = ""
+    try:
+        if audio_base64:
+            audio_path = _decode_audio_base64(audio_base64)
+        else:
+            audio_path = _download_audio(audio_url)
+
+        model_instance = _get_model(requested_model)
+        print(f"Starting transcription with model {requested_model}...", flush=True)
+        
+        segments_iter, info = model_instance.transcribe(
+            audio_path,
+            language=language,
+            vad_filter=vad_filter,
+            word_timestamps=word_timestamps,
+            temperature=temperature,
+            best_of=best_of,
+            beam_size=beam_size,
+            patience=patience,
+            length_penalty=length_penalty,
+        )
+
+        segments_list: List[Dict[str, Any]] = []
+        for seg in segments_iter:
+            segments_list.append(
+                {
+                    "start": float(seg.start),
+                    "end": float(seg.end),
+                    "text": str(seg.text).strip(),
+                }
+            )
+
+        text = _format_transcript(segments_list, "plain_text")
+        formatted = _format_transcript(segments_list, transcription_format)
+
+        print(f"Transcription complete: {len(segments_list)} segments, {len(text)} chars", flush=True)
+
+        result: Dict[str, Any] = {
+            "text": text,
+            "transcription": text,
+            "language": str(info.language) if info and info.language else "unknown",
+            "duration": float(info.duration) if info and info.duration else None,
+            "model": requested_model,
+        }
+
+        if include_segments:
+            result["segments"] = segments_list
+
+        if transcription_format != "plain_text":
+            result["formatted_transcription"] = formatted
+
+        return result
+    except Exception as e:
+        print(f"ERROR during transcription: {e}", flush=True)
+        return {"error": str(e)}
+    finally:
+        if audio_path and os.path.exists(audio_path):
+            try:
+                os.remove(audio_path)
+            except OSError:
+                pass
+
+
+print("Worker initialized, starting RunPod serverless...", flush=True)
 runpod.serverless.start({"handler": handler})
